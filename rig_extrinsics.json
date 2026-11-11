@@ -1,0 +1,30 @@
+{
+  "T_lidar_to_cam": [
+    [
+      -0.11640340991811486,
+      -0.9931375115237434,
+      0.011319424185106106,
+      0.1595322974851537
+    ],
+    [
+      0.3230585375304411,
+      -0.04863719631280054,
+      -0.9451283534333041,
+      -1.4962194709774281
+    ],
+    [
+      0.9391929660555114,
+      -0.10635932652699498,
+      0.3265030875391436,
+      2.6955116969937185
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "reference_frame_idx": 1014,
+  "note": "Ekstrinsik LiDAR->kamera (hasil ICP, T_refined) dari calib_config.json lama. Berlaku selama posisi pemasangan LiDAR dan kamera ZED di mobil TIDAK berubah. Kalau sensor dipasang ulang, ganti file ini dengan hasil ICP baru."
+}
