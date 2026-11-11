@@ -8,3 +8,7 @@
 # 3. Kecualikan (tetap track) semua file bertipe Python (.py)
 !*.py
 !**/*.py
+
+# 4. Kecualikan (tetap track) semua file Markdown (.md)
+!*.md
+!**/*.md
