@@ -1,0 +1,10 @@
+# 1. Abaikan semua file dan folder di dalam repositori
+*
+
+# 2. Kecualikan (tetap track) folder dan file .gitignore sendiri
+!.gitignore
+!.git/
+
+# 3. Kecualikan (tetap track) semua file bertipe Python (.py)
+!*.py
+!**/*.py
