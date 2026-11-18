@@ -1,35 +1,40 @@
-# ==============================================================================
-# Requirements untuk Pipeline Pemrosesan Rosbag BEV & Streaming (Jetson Xavier NX / Linux)
-# Python: 3.8
-# ==============================================================================
+# ===================================================================
+# requirements.txt - pemrosesan_file_rosbag (MEVI Pro)
+# Diuji: NVIDIA Jetson Xavier NX, Ubuntu 20.04, Python 3.8
+#
+# CATATAN: torch dan torchvision TIDAK dimasukkan di sini.
+# Di Jetson (ARM64), PyTorch harus dipasang dari wheel NVIDIA (JetPack)
+# agar CUDA aktif. Pasang dulu, baru jalankan:
+#     pip install -r requirements.txt
+# ===================================================================
 
-# Core Scientific & Data Processing
+# --- Komputasi numerik dan data ---
 numpy==1.23.5
 scipy==1.10.1
 pandas==2.0.3
+scikit-learn>=1.3.0        # DBSCAN (Fase 3)
 
-# Image & Vision Processing
+# --- Citra dan visi komputer ---
 opencv-python-headless>=4.8.0
 Pillow>=10.0.0
 matplotlib>=3.7.0
 
-# Deep Learning (Hugging Face SegFormer untuk Segmentasi Jalan)
-transformers>=4.40.0
+# --- Model AI ---
+ultralytics>=8.3.0         # YOLO11 (Fase 3)
+lap>=0.5.12                # pelacakan ByteTrack (Fase 3)
+transformers>=4.40.0       # SegFormer-B2 (Fase 6)
 huggingface_hub>=0.25.0
 safetensors>=0.4.0
 
-# YOLO 3D / Object Detection
-ultralytics>=8.0.0
-
-# ROSbag Extraction (Pure Python, tanpa instalasi penuh ROS desktop)
+# --- Pembaca rosbag (tanpa ROS) ---
 rosbags>=0.9.20
 lz4>=4.3.0
 zstandard>=0.22.0
 
-# Streaming via WebSocket ke ROSBridge / Flutter
+# --- Streaming ke ROS Bridge ---
 roslibpy>=2.0.0
 
-# Utilities
+# --- Utilitas ---
 tqdm>=4.66.0
 PyYAML>=6.0
 psutil>=5.9.0
