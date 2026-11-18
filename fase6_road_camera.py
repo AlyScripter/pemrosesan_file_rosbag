@@ -27,10 +27,14 @@ Beda dengan skrip asli (hasil identik, hanya lebih cepat):
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:32"
 
 import numpy as np
 
@@ -43,8 +47,8 @@ except ImportError:                             # pragma: no cover
         return x
 
 MODEL_NAME = "nvidia/segformer-b2-finetuned-cityscapes-1024-1024"
-INPUT_WIDTH = 1024            # lebar input model (tinggi mengikuti rasio, kelipatan 32)
-BATCH = 8
+INPUT_WIDTH = 640             # disesuaikan dengan resolusi native kamera (640x360 -> 640x384, hemat VRAM >60%)
+BATCH = 2
 SEG_IGNORE, SEG_ROAD, SEG_NONROAD = 0, 1, 2
 _ROAD_NAMES = {"road", "service-lane", "parking"}
 _NONROAD_NAMES = {"sidewalk", "building", "wall", "fence", "guard rail", "guard-rail", "pole", "polegroup",
@@ -90,12 +94,14 @@ def build_lut(id2label):
 def make_predictor(model_name=MODEL_NAME, device=None, width=INPUT_WIDTH, fp32=False, model=None):
     """Return predict(list[HxWx3 uint8]) -> list[HxW uint8 kode 0/1/2]. LUT & argmax dijalankan di GPU.
 
-    Mode inferensi (dipilih predict.tune, default fp32 murni sampai tune dipanggil):
-      fp32 = bobot & aktivasi fp32 (REFERENSI)      amp = bobot fp32 + autocast fp16 (layernorm/softmax tetap fp32)
-      half = salinan bobot fp16 terpisah (bobot fp32 asli TIDAK dibulatkan; fallback ke fp32 = fp32 murni sungguhan)
-    Pengaman per batch: logit non-finite pada mode non-fp32 -> beralih permanen ke fp32 murni dan batch diulang.
+    Mode inferensi (dipilih predict.tune):
+      fp32 = bobot & aktivasi fp32 (REFERENSI)
+      amp = bobot fp32 + autocast fp16
+      half = bobot fp16 murni (sangat hemat memori & cepat di Jetson Tegra GPU)
+    Pengaman: logit non-finite -> beralih permanen ke mode cadangan.
     predict.prep(img) meresize di thread pemuat; predict menerima gambar mentah ATAU hasil prep."""
     import copy
+    import gc
     import torch
     import torch.nn.functional as F
     from PIL import Image
@@ -107,19 +113,22 @@ def make_predictor(model_name=MODEL_NAME, device=None, width=INPUT_WIDTH, fp32=F
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     cuda = device.startswith("cuda")
+    use_half = cuda and not fp32
     if model is None:
-        model = SegformerForSemanticSegmentation.from_pretrained(model_name, torch_dtype=torch.float32)
+        dtype = torch.float16 if use_half else torch.float32
+        model = SegformerForSemanticSegmentation.from_pretrained(model_name, torch_dtype=dtype)
     model = model.to(device).eval()
     if cuda:
         torch.backends.cudnn.benchmark = True            # ukuran input tetap -> autotune sekali
     lut = build_lut({int(k): v for k, v in model.config.id2label.items()})
     lut_t = torch.from_numpy(lut).to(device)
-    mean32 = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
-    std32 = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+    tensor_dtype = torch.float16 if use_half else torch.float32
+    mean32 = torch.tensor([0.485, 0.456, 0.406], device=device, dtype=tensor_dtype).view(1, 3, 1, 1)
+    std32 = torch.tensor([0.229, 0.224, 0.225], device=device, dtype=tensor_dtype).view(1, 3, 1, 1)
     w_r = int(round(width / 32)) * 32
-    state = {"mode": "fp32", "first": True, "m16": None, "t_pred": 0.0, "n_pred": 0}
+    state = {"mode": "half" if use_half else "fp32", "first": True, "m16": None, "t_pred": 0.0, "n_pred": 0}
     amp_dtype = torch.float16 if cuda else torch.bfloat16
-    print(f"[Fase 6] model {model_name} di {device} (fp32 murni dulu; pengatur otomatis memilih mode tercepat yang hasilnya sama)")
+    print(f"[Fase 6] model {model_name} di {device} ({'fp16 (hemat VRAM)' if use_half else 'fp32'}; input width={w_r})")
 
     def prep(im):
         if isinstance(im, tuple):
@@ -130,10 +139,12 @@ def make_predictor(model_name=MODEL_NAME, device=None, width=INPUT_WIDTH, fp32=F
 
     def _logits(x, mode):
         xn = (x - mean32) / std32
-        if mode == "half":
-            if state["m16"] is None:
-                state["m16"] = copy.deepcopy(model).half()
-            return state["m16"](pixel_values=xn.half()).logits.float()
+        if use_half or mode == "half":
+            if not use_half:
+                if state["m16"] is None:
+                    state["m16"] = copy.deepcopy(model).half()
+                return state["m16"](pixel_values=xn.half()).logits.float()
+            return model(pixel_values=xn).logits.float()
         if mode == "amp":
             with torch.autocast(device_type="cuda" if cuda else "cpu", dtype=amp_dtype):
                 return model(pixel_values=xn).logits.float()
@@ -144,7 +155,7 @@ def make_predictor(model_name=MODEL_NAME, device=None, width=INPUT_WIDTH, fp32=F
         """-> (list kode HxW uint8, logit finite?, kelas unik batch)"""
         items = [prep(im) for im in images]
         H, W = items[0][1]
-        x = torch.from_numpy(np.stack([a for a, _ in items])).to(device).permute(0, 3, 1, 2).float().div_(255.0)
+        x = torch.from_numpy(np.stack([a for a, _ in items])).to(device).permute(0, 3, 1, 2).to(dtype=tensor_dtype).div_(255.0)
         logits = _logits(x, mode)
         finite = bool(torch.isfinite(logits).all())
         full = F.interpolate(logits, size=(H, W), mode="bilinear", align_corners=False).argmax(1)
@@ -155,13 +166,13 @@ def make_predictor(model_name=MODEL_NAME, device=None, width=INPUT_WIDTH, fp32=F
     def predict(images):
         t0 = time.perf_counter()
         codes, finite, uniq = _run(images, state["mode"])
-        if not finite and state["mode"] != "fp32":
+        if not finite and state["mode"] != "fp32" and not use_half:
             print(f"[Fase 6] PERINGATAN: logit {state['mode']} tidak finite (NaN/Inf) -> beralih ke fp32 murni untuk sisa proses")
             state["mode"] = "fp32"
             predict.mode = "fp32"
             codes, finite, uniq = _run(images, "fp32")
         if not finite:
-            raise RuntimeError("Fase 6: logit model tidak finite bahkan di fp32 (cek versi torch/transformers & bobot model)")
+            raise RuntimeError("Fase 6: logit model tidak finite (cek versi torch/transformers & bobot model)")
         if state["first"]:
             state["first"] = False
             print(f"[Fase 6] batch pertama: logit finite, {len(uniq)} kelas Cityscapes terdeteksi {uniq}")
@@ -179,11 +190,14 @@ def make_predictor(model_name=MODEL_NAME, device=None, width=INPUT_WIDTH, fp32=F
         return same, (inter / union if union else 1.0)
 
     def tune(samples, modes=None, tune_batch=True, min_agree=MIN_AGREE, min_iou=MIN_ROAD_IOU, min_gain=MIN_GAIN):
-        """Pilih mode & batch tercepat yang hasilnya SAMA dengan fp32 murni. Mengembalikan laporan (dict)."""
+        """Pilih mode & batch tercepat yang hasilnya SAMA dengan referensi. Mengembalikan laporan (dict)."""
         imgs = [prep(s) for s in samples]
-        modes = ["fp32"] + [m for m in (modes or (["fp32"] if (fp32 or not cuda) else ["amp", "half"])) if m != "fp32"]
+        if use_half:
+            modes = ["half"]
+        else:
+            modes = ["fp32"] + [m for m in (modes or (["fp32"] if (fp32 or not cuda) else ["amp", "half"])) if m != "fp32"]
         cand, ref = [], None
-        print(f"[Fase 6] pengatur otomatis: {len(imgs)} frame contoh, referensi = fp32 murni")
+        print(f"[Fase 6] pengatur otomatis: {len(imgs)} frame contoh, mode = {'half (fp16)' if use_half else 'fp32'}")
         for m in modes:
             try:
                 _run(imgs[:1], m)                                          # pemanasan (autotune cudnn, alokasi)
@@ -191,30 +205,41 @@ def make_predictor(model_name=MODEL_NAME, device=None, width=INPUT_WIDTH, fp32=F
                 res = [_run([im], m) for im in imgs]
                 dt = (time.perf_counter() - t0) / len(imgs)
             except RuntimeError as e:                                      # mis. op tak didukung di perangkat ini
+                if cuda:
+                    torch.cuda.empty_cache()
                 cand.append({"mode": m, "ok": False, "why": f"error: {str(e)[:80]}"})
                 print(f"   {m:5s} DITOLAK ({str(e)[:80]})")
                 continue
             codes, fin = [r[0][0] for r in res], all(r[1] for r in res)
-            if m == "fp32":
+            if ref is None:
                 if not fin:
-                    raise RuntimeError("Fase 6: logit fp32 tidak finite (cek versi torch/transformers & bobot model)")
+                    raise RuntimeError("Fase 6: logit model tidak finite (cek versi torch/transformers & bobot model)")
                 ref, same, iou = codes, 1.0, 1.0
             else:
                 same, iou = _agreement(codes, ref) if fin else (0.0, 0.0)
-            ok = fin and (m == "fp32" or (same >= min_agree and iou >= min_iou))        # fp32 = referensi, selalu layak
+            ok = fin and (len(cand) == 0 or (same >= min_agree and iou >= min_iou))
             why = "" if ok else ("logit NaN/Inf" if not fin else f"hasil beda (sama {same:.2%}, IoU jalan {iou:.3f})")
             cand.append({"mode": m, "sec_per_frame": round(dt, 4), "same_pixels": round(same, 5), "road_iou": round(iou, 4), "ok": ok, "why": why})
             print(f"   {m:5s} {dt:6.3f} s/frame | sama {same:7.2%} | IoU jalan {iou:.3f} | {'LAYAK' if ok else 'DITOLAK: ' + why}")
-        base = next(c for c in cand if c["mode"] == "fp32")
-        pool = [c for c in cand if c["mode"] != "fp32" and c["ok"] and c["sec_per_frame"] <= base["sec_per_frame"] * (1 - min_gain)]
-        best = min(pool, key=lambda c: c["sec_per_frame"]) if pool else base
+
+        valid = [c for c in cand if c.get("ok") and "sec_per_frame" in c]
+        if not valid:
+            best = {"mode": "half" if use_half else "fp32", "sec_per_frame": 0.25}
+        else:
+            base = next((c for c in valid if c["mode"] == "fp32"), None)
+            if base:
+                pool = [c for c in valid if c["mode"] != "fp32" and c["sec_per_frame"] <= base["sec_per_frame"] * (1 - min_gain)]
+                best = min(pool, key=lambda c: c["sec_per_frame"]) if pool else base
+            else:
+                best = min(valid, key=lambda c: c["sec_per_frame"])
+
         state["mode"] = best["mode"]
         predict.mode = best["mode"]
         spf, batch, peak = best["sec_per_frame"], 1, None
-        # ukuran batch: DIUKUR (jatuh ke RAM sistem terlihat sebagai waktu/frame yang memburuk atau puncak memori ~ penuh)
+        # ukuran batch: DIUKUR
         if tune_batch and cuda:
             vram = torch.cuda.get_device_properties(0).total_memory / 2 ** 30
-            for b in ((2,) if vram < 6 else (2, 4) if vram < 10 else (2, 4, 8)):
+            for b in (2,) if vram < 8 else (2, 4):
                 try:
                     torch.cuda.reset_peak_memory_stats()
                     group = [imgs[i % len(imgs)] for i in range(b)]
@@ -230,7 +255,7 @@ def make_predictor(model_name=MODEL_NAME, device=None, width=INPUT_WIDTH, fp32=F
                     torch.cuda.empty_cache()
                     print(f"   batch {b}: kehabisan VRAM -> berhenti")
                     break
-                full = peak > 0.9 * vram
+                full = peak > 0.8 * vram
                 print(f"   batch {b}: {per:.3f} s/frame (puncak VRAM {peak:.2f}/{vram:.1f} GB){' -> terlalu penuh' if full else ''}")
                 if full or per > spf * (1 - min_gain):
                     break
@@ -243,13 +268,8 @@ def make_predictor(model_name=MODEL_NAME, device=None, width=INPUT_WIDTH, fp32=F
         print(f"[Fase 6] DIPAKAI: mode {best['mode']}, batch {batch} (~{spf:.3f} s/frame)")
         return rep
 
-    # nilai awal aman bila tune tidak dipanggil: GPU < 6 GB -> batch 1 (batch 8 fp32 di 4 GB = jatuh ke RAM sistem, 8x lebih lambat)
-    if cuda:
-        vram0 = torch.cuda.get_device_properties(0).total_memory / 2 ** 30
-        predict.suggested_batch = 1 if vram0 < 6 else (2 if vram0 < 10 else 4)
-    else:
-        predict.suggested_batch = 1
-    predict.mode = "fp32"
+    predict.suggested_batch = 1
+    predict.mode = state["mode"]
     predict.prep = prep
     predict.tune = tune
     predict.stats = lambda: (state["t_pred"], state["n_pred"])

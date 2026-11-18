@@ -1,0 +1,35 @@
+# ==============================================================================
+# Requirements untuk Pipeline Pemrosesan Rosbag BEV & Streaming (Jetson Xavier NX / Linux)
+# Python: 3.8
+# ==============================================================================
+
+# Core Scientific & Data Processing
+numpy==1.23.5
+scipy==1.10.1
+pandas==2.0.3
+
+# Image & Vision Processing
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+matplotlib>=3.7.0
+
+# Deep Learning (Hugging Face SegFormer untuk Segmentasi Jalan)
+transformers>=4.40.0
+huggingface_hub>=0.25.0
+safetensors>=0.4.0
+
+# YOLO 3D / Object Detection
+ultralytics>=8.0.0
+
+# ROSbag Extraction (Pure Python, tanpa instalasi penuh ROS desktop)
+rosbags>=0.9.20
+lz4>=4.3.0
+zstandard>=0.22.0
+
+# Streaming via WebSocket ke ROSBridge / Flutter
+roslibpy>=2.0.0
+
+# Utilities
+tqdm>=4.66.0
+PyYAML>=6.0
+psutil>=5.9.0

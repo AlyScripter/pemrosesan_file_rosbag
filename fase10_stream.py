@@ -277,7 +277,7 @@ def run(out, force=False, strict=False, host=ROSBRIDGE_HOST, port=ROSBRIDGE_PORT
         return
     telemetry = build_telemetry_lookup(Paths(out).wp_csv)
     import roslibpy                                    # import malas: hanya Fase 10 yang butuh
-    client = roslibpy.Ros(host=host, port=port, transport="asyncio")
+    client = roslibpy.Ros(host=host, port=port)
     client.run()
     print(f"Terhubung ke rosbridge di ws://{host}:{port}")
     mk = roslibpy.Message
